@@ -1,61 +1,90 @@
-const knex = require('knex');
+const initSqlJs = require('sql.js');
+const fs = require('fs');
 const path = require('path');
 
-const db = knex({
-  client: 'sqlite3',
-  connection: {
-    filename: process.env.DB_FILE || './abollalatas.db'
-  },
-  useNullAsDefault: true
-});
+const DB_PATH = process.env.DB_FILE || './abollalatas.db';
 
-async function initDB() {
-  // Usuarios
-  const hasUsuarios = await db.schema.hasTable('usuarios');
-  if (!hasUsuarios) {
-    await db.schema.createTable('usuarios', t => {
-      t.increments('id').primary();
-      t.string('nombre').notNullable();
-      t.string('email').notNullable().unique();
-      t.string('password').notNullable();
-      t.string('condominio').notNullable();
-      t.string('sector').notNullable();
-      t.string('rol').notNullable().defaultTo('usuario');
-      t.timestamp('creado_en').defaultTo(db.fn.now());
-    });
-    console.log('Tabla usuarios creada');
+let db;
+
+async function getDB() {
+  if (db) return db;
+
+  const SQL = await initSqlJs();
+
+  if (fs.existsSync(DB_PATH)) {
+    const fileBuffer = fs.readFileSync(DB_PATH);
+    db = new SQL.Database(fileBuffer);
+  } else {
+    db = new SQL.Database();
   }
 
-  // Dispositivos
-  const hasDispositivos = await db.schema.hasTable('dispositivos');
-  if (!hasDispositivos) {
-    await db.schema.createTable('dispositivos', t => {
-      t.increments('id').primary();
-      t.string('device_id').notNullable().unique();
-      t.string('condominio').notNullable();
-      t.string('sector').notNullable();
-      t.integer('activo').notNullable().defaultTo(1);
-      t.timestamp('creado_en').defaultTo(db.fn.now());
-    });
-    console.log('Tabla dispositivos creada');
-  }
+  db.run(`
+    CREATE TABLE IF NOT EXISTS usuarios (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombre      TEXT    NOT NULL,
+      email       TEXT    NOT NULL UNIQUE,
+      password    TEXT    NOT NULL,
+      condominio  TEXT    NOT NULL,
+      sector      TEXT    NOT NULL,
+      rol         TEXT    NOT NULL DEFAULT 'usuario',
+      creado_en   TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS sesiones (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id   TEXT    NOT NULL,
+      usuario_id  INTEGER NOT NULL,
+      condominio  TEXT    NOT NULL,
+      sector      TEXT    NOT NULL,
+      cant_latas  INTEGER NOT NULL DEFAULT 0,
+      bat_pct     INTEGER,
+      fecha       TEXT    NOT NULL,
+      creado_en   TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 
-  // Sesiones
-  const hasSesiones = await db.schema.hasTable('sesiones');
-  if (!hasSesiones) {
-    await db.schema.createTable('sesiones', t => {
-      t.increments('id').primary();
-      t.string('device_id').notNullable();
-      t.integer('usuario_id').notNullable().references('id').inTable('usuarios');
-      t.string('condominio').notNullable();
-      t.string('sector').notNullable();
-      t.integer('cant_latas').notNullable().defaultTo(0);
-      t.integer('bat_pct');
-      t.string('fecha').notNullable();
-      t.timestamp('creado_en').defaultTo(db.fn.now());
-    });
-    console.log('Tabla sesiones creada');
-  }
+  saveDB();
+  console.log('Base de datos inicializada');
+  return db;
 }
 
-module.exports = { db, initDB };
+function saveDB() {
+  if (!db) return;
+  const data = db.export();
+  const buffer = Buffer.from(data);
+  fs.writeFileSync(DB_PATH, buffer);
+}
+
+function run(sql, params = []) {
+  db.run(sql, params);
+  saveDB();
+}
+
+function get(sql, params = []) {
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    stmt.free();
+    return row;
+  }
+  stmt.free();
+  return null;
+}
+
+function all(sql, params = []) {
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  const rows = [];
+  while (stmt.step()) {
+    rows.push(stmt.getAsObject());
+  }
+  stmt.free();
+  return rows;
+}
+
+function lastInsertId() {
+  const row = get('SELECT last_insert_rowid() as id');
+  return row ? row.id : null;
+}
+
+module.exports = { getDB, run, get, all, lastInsertId, saveDB };
