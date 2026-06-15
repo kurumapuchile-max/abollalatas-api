@@ -30,20 +30,25 @@ function authMiddleware(req, res, next) {
 app.post('/api/auth/registro', async (req, res) => {
   try {
     const { nombre, email, password, condominio, sector } = req.body;
-    if (!nombre || !email || !password || !condominio || !sector) {
-      return res.status(400).json({ error: 'Todos los campos son requeridos' });
+    if (!nombre || !email || !password) {
+      return res.status(400).json({ error: 'nombre, email y password son requeridos' });
     }
+    // condominio y sector son opcionales (ej: login con Google que aun no tiene perfil completo).
+    // El usuario los completa despues en su perfil.
+    const condFinal = condominio || 'Sin asignar';
+    const sectFinal = sector     || 'Sin asignar';
+
     const existe = dbModule.get('SELECT id FROM usuarios WHERE email = ?', [email]);
     if (existe) return res.status(409).json({ error: 'Email ya registrado' });
 
     const hash = bcrypt.hashSync(password, 10);
     dbModule.run(
       'INSERT INTO usuarios (nombre, email, password, condominio, sector) VALUES (?,?,?,?,?)',
-      [nombre, email, hash, condominio, sector]
+      [nombre, email, hash, condFinal, sectFinal]
     );
     const id = dbModule.lastInsertId();
-    const token = jwt.sign({ id, nombre, email, condominio, sector, rol: 'usuario' }, SECRET, { expiresIn: '30d' });
-    res.json({ token, nombre, condominio, sector });
+    const token = jwt.sign({ id, nombre, email, condominio: condFinal, sector: sectFinal, rol: 'usuario' }, SECRET, { expiresIn: '30d' });
+    res.json({ token, nombre, condominio: condFinal, sector: sectFinal });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -71,6 +76,27 @@ app.post('/api/auth/login', async (req, res) => {
 // GET /api/auth/me
 app.get('/api/auth/me', authMiddleware, (req, res) => {
   res.json(req.user);
+});
+
+// PUT /api/auth/perfil  -> completar/actualizar condominio y sector (ej: tras login con Google)
+app.put('/api/auth/perfil', authMiddleware, (req, res) => {
+  try {
+    const { condominio, sector } = req.body;
+    if (!condominio || !sector) {
+      return res.status(400).json({ error: 'condominio y sector son requeridos' });
+    }
+    dbModule.run('UPDATE usuarios SET condominio = ?, sector = ? WHERE id = ?',
+      [condominio, sector, req.user.id]);
+
+    const usuario = dbModule.get('SELECT id, nombre, email, condominio, sector, rol FROM usuarios WHERE id = ?', [req.user.id]);
+    const token = jwt.sign(
+      { id: usuario.id, nombre: usuario.nombre, email: usuario.email, condominio: usuario.condominio, sector: usuario.sector, rol: usuario.rol },
+      SECRET, { expiresIn: '30d' }
+    );
+    res.json({ ok: true, token, usuario });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // POST /api/sesiones
