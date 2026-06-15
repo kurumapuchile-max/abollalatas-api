@@ -1,73 +1,133 @@
+const initSqlJs = require('sql.js');
 const fs = require('fs');
+const path = require('path');
 
-const DB_PATH      = process.env.DB_FILE || './abollalatas.db';
-const GITHUB_TOKEN = process.env.BACKUP_GITHUB_TOKEN;
-const BACKUP_REPO  = process.env.BACKUP_REPO;   // ej: "kurumapuchile-max/abollalatas-backup"
-const BACKUP_BRANCH = process.env.BACKUP_BRANCH || 'main';
+const DB_PATH = process.env.DB_FILE || './abollalatas.db';
 
-// Sube una copia de la base de datos al repo privado de backup en GitHub.
-// Cada dia se crea un archivo nuevo con la fecha, asi queda historial.
-async function backupToGitHub() {
-  if (!GITHUB_TOKEN || !BACKUP_REPO) {
-    console.log('[backup] Variables BACKUP_GITHUB_TOKEN o BACKUP_REPO no configuradas, backup omitido.');
-    return;
+let db;
+
+async function getDB() {
+  if (db) return db;
+
+  const SQL = await initSqlJs();
+
+  if (fs.existsSync(DB_PATH)) {
+    const fileBuffer = fs.readFileSync(DB_PATH);
+    db = new SQL.Database(fileBuffer);
+  } else {
+    db = new SQL.Database();
   }
 
-  try {
-    if (!fs.existsSync(DB_PATH)) {
-      console.log('[backup] No existe el archivo de base de datos todavia, backup omitido.');
-      return;
-    }
+  db.run(`
+    CREATE TABLE IF NOT EXISTS usuarios (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombre      TEXT    NOT NULL,
+      email       TEXT    NOT NULL UNIQUE,
+      password    TEXT    NOT NULL,
+      condominio  TEXT    NOT NULL,
+      sector      TEXT    NOT NULL,
+      rol         TEXT    NOT NULL DEFAULT 'usuario',
+      creado_en   TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS sesiones (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id   TEXT    NOT NULL,
+      usuario_id  INTEGER NOT NULL,
+      condominio  TEXT    NOT NULL,
+      sector      TEXT    NOT NULL,
+      cant_latas  INTEGER NOT NULL DEFAULT 0,
+      bat_pct     INTEGER,
+      fecha       TEXT    NOT NULL,
+      creado_en   TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS dispositivos (
+      device_id          TEXT    PRIMARY KEY,
+      nombre             TEXT,
+      condominio         TEXT    NOT NULL,
+      sector             TEXT    NOT NULL,
+      sector_geografico  TEXT    NOT NULL,
+      piso               TEXT,
+      lat                REAL,
+      lng                REAL,
+      creado_en          TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 
-    const fecha = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-    const path  = `backups/abollalatas-${fecha}.db`;
-    const content = fs.readFileSync(DB_PATH).toString('base64');
-
-    const url = `https://api.github.com/repos/${BACKUP_REPO}/contents/${path}`;
-
-    // Revisar si ya existe un backup de hoy (para actualizarlo en vez de duplicar)
-    let sha;
-    const existing = await fetch(url + `?ref=${BACKUP_BRANCH}`, {
-      headers: {
-        'Authorization': `Bearer ${GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github+json'
-      }
-    });
-    if (existing.status === 200) {
-      const data = await existing.json();
-      sha = data.sha;
-    }
-
-    const resp = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github+json',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        message: `Backup automatico ${fecha}`,
-        content,
-        branch: BACKUP_BRANCH,
-        ...(sha ? { sha } : {})
-      })
-    });
-
-    if (resp.ok) {
-      console.log(`[backup] Backup subido correctamente: ${path}`);
-    } else {
-      const err = await resp.text();
-      console.error(`[backup] Error subiendo backup (${resp.status}):`, err);
-    }
-  } catch (e) {
-    console.error('[backup] Error inesperado:', e.message);
+  // Migracion suave: agregar columnas nuevas a sesiones si la DB ya existia
+  // (sql.js no soporta "ADD COLUMN IF NOT EXISTS", por eso el try/catch)
+  const migraciones = [
+    `ALTER TABLE sesiones ADD COLUMN sector_geografico TEXT`,
+    `ALTER TABLE sesiones ADD COLUMN piso TEXT`,
+    `ALTER TABLE dispositivos ADD COLUMN nombre TEXT`,
+    `ALTER TABLE dispositivos ADD COLUMN sector_geografico TEXT`,
+    `ALTER TABLE dispositivos ADD COLUMN piso TEXT`,
+    `ALTER TABLE dispositivos ADD COLUMN lat REAL`,
+    `ALTER TABLE dispositivos ADD COLUMN lng REAL`
+  ];
+  for (const sql of migraciones) {
+    try { db.run(sql); } catch (e) { /* columna ya existe, ignorar */ }
   }
+
+  saveDB();
+  console.log('Base de datos inicializada');
+  return db;
 }
 
-// Programa el backup para correr cada 24 horas, y una vez al iniciar (con un pequeño delay).
-function startBackupSchedule() {
-  setTimeout(backupToGitHub, 60 * 1000); // primer backup 1 minuto despues de iniciar
-  setInterval(backupToGitHub, 24 * 60 * 60 * 1000); // luego cada 24 horas
+function saveDB() {
+  if (!db) return;
+  const data = db.export();
+  const buffer = Buffer.from(data);
+  fs.writeFileSync(DB_PATH, buffer);
 }
 
-module.exports = { backupToGitHub, startBackupSchedule };
+let lastId = null;
+
+function run(sql, params = []) {
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  stmt.step();
+  stmt.free();
+
+  // Capturar el ultimo id insertado ANTES de exportar/guardar,
+  // porque db.export() resetea last_insert_rowid().
+  const idStmt = db.prepare('SELECT last_insert_rowid() as id');
+  idStmt.bind([]);
+  idStmt.step();
+  lastId = idStmt.getAsObject().id;
+  idStmt.free();
+
+  saveDB();
+}
+
+function get(sql, params = []) {
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    stmt.free();
+    return row;
+  }
+  stmt.free();
+  return null;
+}
+
+function all(sql, params = []) {
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  const rows = [];
+  while (stmt.step()) {
+    rows.push(stmt.getAsObject());
+  }
+  stmt.free();
+  return rows;
+}
+
+function lastInsertId() {
+  return lastId;
+}
+
+function getDispositivo(device_id) {
+  return get('SELECT * FROM dispositivos WHERE device_id = ?', [device_id]);
+}
+
+module.exports = { getDB, run, get, all, lastInsertId, saveDB, getDispositivo };
