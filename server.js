@@ -350,7 +350,98 @@ app.get('/api/mapa', authMiddleware, (req, res) => {
   }
 });
 
-// Iniciar servidor
+// GET /api/stats/anual?anio=2026
+app.get('/api/stats/anual', authMiddleware, (req, res) => {
+  try {
+    const { anio } = req.query;
+    if (!anio) return res.status(400).json({ error: 'anio requerido' });
+
+    const ranking = dbModule.all(
+      `SELECT sector, condominio, SUM(cant_latas) as total_latas, COUNT(*) as total_sesiones
+       FROM sesiones WHERE fecha LIKE ? GROUP BY sector, condominio ORDER BY total_latas DESC`,
+      [`${anio}%`]
+    );
+    const totales = dbModule.get(
+      'SELECT SUM(cant_latas) as total_latas, COUNT(*) as total_sesiones FROM sesiones WHERE fecha LIKE ?',
+      [`${anio}%`]
+    );
+    const porMes = dbModule.all(
+      `SELECT strftime('%m', fecha) as mes, SUM(cant_latas) as total_latas, COUNT(*) as total_sesiones
+       FROM sesiones WHERE fecha LIKE ? GROUP BY mes ORDER BY mes ASC`,
+      [`${anio}%`]
+    );
+    res.json({
+      anio,
+      total_latas: totales?.total_latas || 0,
+      total_sesiones: totales?.total_sesiones || 0,
+      por_mes: porMes,
+      ranking
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/stats/semestral?anio=2026&semestre=1
+// semestre 1 = enero-junio, semestre 2 = julio-diciembre
+app.get('/api/stats/semestral', authMiddleware, (req, res) => {
+  try {
+    const { anio, semestre } = req.query;
+    if (!anio || !semestre) return res.status(400).json({ error: 'anio y semestre requeridos' });
+
+    const meses = semestre === '1'
+      ? ['01','02','03','04','05','06']
+      : ['07','08','09','10','11','12'];
+
+    const placeholders = meses.map(() => `fecha LIKE ?`).join(' OR ');
+    const params = meses.map(m => `${anio}-${m}%`);
+
+    const totales = dbModule.get(
+      `SELECT SUM(cant_latas) as total_latas, COUNT(*) as total_sesiones FROM sesiones WHERE ${placeholders}`,
+      params
+    );
+    const ranking = dbModule.all(
+      `SELECT sector, condominio, SUM(cant_latas) as total_latas, COUNT(*) as total_sesiones
+       FROM sesiones WHERE ${placeholders} GROUP BY sector, condominio ORDER BY total_latas DESC`,
+      params
+    );
+    const porMes = dbModule.all(
+      `SELECT strftime('%m', fecha) as mes, SUM(cant_latas) as total_latas, COUNT(*) as total_sesiones
+       FROM sesiones WHERE ${placeholders} GROUP BY mes ORDER BY mes ASC`,
+      params
+    );
+    res.json({
+      anio,
+      semestre: parseInt(semestre),
+      meses_incluidos: meses,
+      total_latas: totales?.total_latas || 0,
+      total_sesiones: totales?.total_sesiones || 0,
+      por_mes: porMes,
+      ranking
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/dispositivos/bateria -> ultimo bat_pct registrado por cada dispositivo
+app.get('/api/dispositivos/bateria', authMiddleware, (req, res) => {
+  try {
+    const baterias = dbModule.all(
+      `SELECT s.device_id, d.nombre, d.condominio, d.sector,
+              s.bat_pct, s.fecha as ultima_sesion
+       FROM sesiones s
+       JOIN dispositivos d ON d.device_id = s.device_id
+       WHERE s.id IN (
+         SELECT MAX(id) FROM sesiones WHERE bat_pct IS NOT NULL GROUP BY device_id
+       )
+       ORDER BY s.bat_pct ASC`
+    );
+    res.json(baterias);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 dbModule.getDB().then(() => {
   app.listen(PORT, () => {
     console.log(`Abollalatas API corriendo en http://localhost:${PORT}`);
