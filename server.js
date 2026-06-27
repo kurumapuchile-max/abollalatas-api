@@ -33,17 +33,11 @@ app.post('/api/auth/registro', async (req, res) => {
     if (!nombre || !email || !password) {
       return res.status(400).json({ error: 'nombre, email y password son requeridos' });
     }
-    // condominio y sector son opcionales (ej: login con Google que aun no tiene perfil completo).
-    // El usuario los completa despues en su perfil.
     const condFinal = condominio || 'Sin asignar';
     const sectFinal = sector     || 'Sin asignar';
 
     const existe = dbModule.get('SELECT * FROM usuarios WHERE email = ?', [email]);
     if (existe) {
-      // Si la peticion NO trae condominio/sector, es el flujo de "Continuar con Google":
-      // Base44 reintenta este endpoint en cada login y genera una password aleatoria distinta
-      // cada vez, asi que no podemos validarla. Como el email ya esta confirmado por Google,
-      // simplemente devolvemos un token valido de la cuenta existente.
       if (!condominio && !sector) {
         const token = jwt.sign(
           { id: existe.id, nombre: existe.nombre, email: existe.email, condominio: existe.condominio, sector: existe.sector, rol: existe.rol },
@@ -51,7 +45,6 @@ app.post('/api/auth/registro', async (req, res) => {
         );
         return res.json({ token, nombre: existe.nombre, condominio: existe.condominio, sector: existe.sector });
       }
-      // Si SI trae condominio/sector, es un registro manual normal -> el email esta ocupado.
       return res.status(409).json({ error: 'Email ya registrado' });
     }
 
@@ -92,7 +85,7 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
   res.json(req.user);
 });
 
-// PUT /api/auth/perfil  -> completar/actualizar condominio y sector (ej: tras login con Google)
+// PUT /api/auth/perfil
 app.put('/api/auth/perfil', authMiddleware, (req, res) => {
   try {
     const { condominio, sector } = req.body;
@@ -127,8 +120,6 @@ app.post('/api/sesiones', (req, res) => {
       return res.status(401).json({ error: 'Token de usuario invalido' });
     }
 
-    // Resolver ubicacion: si el device_id esta registrado en "dispositivos",
-    // esa ubicacion fija manda por sobre lo que mande el ESP32 o la app.
     const dispositivo = dbModule.getDispositivo(device_id);
     const condFinal   = dispositivo?.condominio        || condominio || userPayload.condominio;
     const sectFinal   = dispositivo?.sector            || sector     || userPayload.sector;
@@ -208,8 +199,6 @@ app.get('/api/stats/mi-sector', authMiddleware, (req, res) => {
 
 // ===== DISPOSITIVOS (maquinas) =====
 
-// POST /api/dispositivos  -> crear o actualizar la ficha de una maquina
-// body: { device_id, nombre, condominio, sector, sector_geografico, piso, lat, lng }
 app.post('/api/dispositivos', authMiddleware, (req, res) => {
   try {
     const { device_id, nombre, condominio, sector, sector_geografico, piso, lat, lng } = req.body;
@@ -237,7 +226,6 @@ app.post('/api/dispositivos', authMiddleware, (req, res) => {
   }
 });
 
-// GET /api/dispositivos -> listar todas las maquinas
 app.get('/api/dispositivos', authMiddleware, (req, res) => {
   try {
     res.json(dbModule.all('SELECT * FROM dispositivos ORDER BY creado_en DESC'));
@@ -248,7 +236,6 @@ app.get('/api/dispositivos', authMiddleware, (req, res) => {
 
 // ===== STATS POR CONDOMINIO Y POR ZONA =====
 
-// GET /api/stats/condominio/:nombre?anio=2026&mes=6
 app.get('/api/stats/condominio/:nombre', authMiddleware, (req, res) => {
   try {
     const { nombre } = req.params;
@@ -280,8 +267,6 @@ app.get('/api/stats/condominio/:nombre', authMiddleware, (req, res) => {
   }
 });
 
-// GET /api/stats/zona/:nombre?anio=2026&mes=6
-// nombre = sector_geografico, ej. "Portal de la Frontera" o "Centro Temuco"
 app.get('/api/stats/zona/:nombre', authMiddleware, (req, res) => {
   try {
     const { nombre } = req.params;
@@ -315,7 +300,6 @@ app.get('/api/stats/zona/:nombre', authMiddleware, (req, res) => {
 
 // ===== MAPA =====
 
-// GET /api/mapa -> todas las maquinas con coordenadas y sus totales (historico y mes actual)
 app.get('/api/mapa', authMiddleware, (req, res) => {
   try {
     const ahora   = new Date();
@@ -350,12 +334,12 @@ app.get('/api/mapa', authMiddleware, (req, res) => {
   }
 });
 
-// GET /api/stats/anual?anio=2026
+// ===== STATS ANUAL, SEMESTRAL, BATERIA =====
+
 app.get('/api/stats/anual', authMiddleware, (req, res) => {
   try {
     const { anio } = req.query;
     if (!anio) return res.status(400).json({ error: 'anio requerido' });
-
     const ranking = dbModule.all(
       `SELECT sector, condominio, SUM(cant_latas) as total_latas, COUNT(*) as total_sesiones
        FROM sesiones WHERE fecha LIKE ? GROUP BY sector, condominio ORDER BY total_latas DESC`,
@@ -382,20 +366,15 @@ app.get('/api/stats/anual', authMiddleware, (req, res) => {
   }
 });
 
-// GET /api/stats/semestral?anio=2026&semestre=1
-// semestre 1 = enero-junio, semestre 2 = julio-diciembre
 app.get('/api/stats/semestral', authMiddleware, (req, res) => {
   try {
     const { anio, semestre } = req.query;
     if (!anio || !semestre) return res.status(400).json({ error: 'anio y semestre requeridos' });
-
     const meses = semestre === '1'
       ? ['01','02','03','04','05','06']
       : ['07','08','09','10','11','12'];
-
     const placeholders = meses.map(() => `fecha LIKE ?`).join(' OR ');
     const params = meses.map(m => `${anio}-${m}%`);
-
     const totales = dbModule.get(
       `SELECT SUM(cant_latas) as total_latas, COUNT(*) as total_sesiones FROM sesiones WHERE ${placeholders}`,
       params
@@ -411,20 +390,16 @@ app.get('/api/stats/semestral', authMiddleware, (req, res) => {
       params
     );
     res.json({
-      anio,
-      semestre: parseInt(semestre),
-      meses_incluidos: meses,
+      anio, semestre: parseInt(semestre), meses_incluidos: meses,
       total_latas: totales?.total_latas || 0,
       total_sesiones: totales?.total_sesiones || 0,
-      por_mes: porMes,
-      ranking
+      por_mes: porMes, ranking
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// GET /api/dispositivos/bateria -> ultimo bat_pct registrado por cada dispositivo
 app.get('/api/dispositivos/bateria', authMiddleware, (req, res) => {
   try {
     const baterias = dbModule.all(
@@ -442,6 +417,62 @@ app.get('/api/dispositivos/bateria', authMiddleware, (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ===== REPORTE POR RANGO DE FECHAS =====
+
+// GET /api/stats/rango?desde=2026-01-01&hasta=2026-06-30&sector=X&condominio=Y
+app.get('/api/stats/rango', authMiddleware, (req, res) => {
+  try {
+    const { desde, hasta, sector, condominio } = req.query;
+    if (!desde || !hasta) return res.status(400).json({ error: 'desde y hasta son requeridos' });
+
+    let where = "fecha >= ? AND fecha <= ?";
+    const params = [desde, hasta + 'T23:59:59'];
+
+    if (sector && sector !== 'todos') {
+      where += ' AND sector = ?';
+      params.push(sector);
+    }
+    if (condominio && condominio !== 'todos') {
+      where += ' AND condominio = ?';
+      params.push(condominio);
+    }
+
+    const totales = dbModule.get(
+      `SELECT SUM(cant_latas) as total_latas, COUNT(*) as total_sesiones FROM sesiones WHERE ${where}`,
+      params
+    );
+    const porMes = dbModule.all(
+      `SELECT strftime('%Y-%m', fecha) as mes, SUM(cant_latas) as total_latas, COUNT(*) as total_sesiones
+       FROM sesiones WHERE ${where} GROUP BY mes ORDER BY mes ASC`,
+      params
+    );
+    const porSector = dbModule.all(
+      `SELECT sector, condominio, SUM(cant_latas) as total_latas, COUNT(*) as total_sesiones
+       FROM sesiones WHERE ${where} GROUP BY sector, condominio ORDER BY total_latas DESC`,
+      params
+    );
+    const sectoresDisponibles = dbModule.all('SELECT DISTINCT sector FROM sesiones WHERE sector IS NOT NULL ORDER BY sector');
+    const condominiosDisponibles = dbModule.all('SELECT DISTINCT condominio FROM sesiones WHERE condominio IS NOT NULL ORDER BY condominio');
+
+    res.json({
+      desde, hasta,
+      sector: sector || 'todos',
+      condominio: condominio || 'todos',
+      total_latas: totales?.total_latas || 0,
+      total_sesiones: totales?.total_sesiones || 0,
+      kg_reciclados: ((totales?.total_latas || 0) * 0.015).toFixed(2),
+      por_mes: porMes,
+      por_sector: porSector,
+      sectores_disponibles: sectoresDisponibles.map(s => s.sector),
+      condominios_disponibles: condominiosDisponibles.map(c => c.condominio)
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ===== INICIAR SERVIDOR =====
 dbModule.getDB().then(() => {
   app.listen(PORT, () => {
     console.log(`Abollalatas API corriendo en http://localhost:${PORT}`);
